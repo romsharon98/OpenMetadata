@@ -935,7 +935,7 @@ public class TestCaseRepository extends EntityRepository<TestCase> {
 
   @Override
   protected List<String> getFieldsStrippedFromStorageJson() {
-    return List.of("testSuite", "testSuites", "testDefinition", "testCaseResult");
+    return List.of("testSuite", "testSuites", "testDefinition", "testCaseResult", INCIDENTS_FIELD);
   }
 
   @Override
@@ -1084,8 +1084,7 @@ public class TestCaseRepository extends EntityRepository<TestCase> {
     TestCaseResolutionStatusRepository tcrsRepo =
         (TestCaseResolutionStatusRepository)
             Entity.getEntityTimeSeriesRepository(Entity.TEST_CASE_RESOLUTION_STATUS);
-    TestCaseResolutionStatus latest = tcrsRepo.getLatestRecord(test.getFullyQualifiedName());
-    return Boolean.TRUE.equals(tcrsRepo.unresolvedIncident(latest)) ? latest.getStateId() : null;
+    return tcrsRepo.getOngoingIncidentStateId(test.getFullyQualifiedName());
   }
 
   public int getTestCaseCount(List<UUID> testCaseIds) {
@@ -1613,9 +1612,6 @@ public class TestCaseRepository extends EntityRepository<TestCase> {
           () ->
               recordChange(
                   "testCaseResult", original.getTestCaseResult(), updated.getTestCaseResult()));
-      compareAndUpdate(
-          INCIDENTS_FIELD,
-          () -> recordChange(INCIDENTS_FIELD, original.getIncidentId(), updated.getIncidentId()));
     }
   }
 
