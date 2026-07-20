@@ -17,7 +17,7 @@ so that PandasProfilerInterface can be used without any BurstIQ-specific
 profiler code.
 """
 
-from typing import TYPE_CHECKING, Callable, Optional, cast  # noqa: UP035
+from typing import TYPE_CHECKING, Callable, cast  # noqa: UP035
 
 import pandas as pd
 
@@ -32,6 +32,7 @@ if TYPE_CHECKING:
     from metadata.ingestion.source.database.burstiq.client import BurstIQClient
 
 _PAGE_SIZE = 5_000
+_MAX_PROFILE_ROWS = 1_000_000  # memory cap for unsampled profiles; raise/lower for wide chains
 
 _NUMERIC_TYPES = {
     DataType.INT,
@@ -139,11 +140,24 @@ class BurstIQSampler(DatalakeSampler):
         The base sampler uses ``dropna()`` which drops a row if *any* column is
         null. BurstIQ omits absent fields per record, so nearly every row has a
         gap — that would drop all rows and return an empty sample. ``how="all"``
-        keeps partially-filled rows (blanks show as empty cells)."""
-        return [[self._truncate_cell(cell) for cell in row] for row in data_frame.dropna(how="all").values.tolist()]
+        keeps partially-filled rows.
 
-    def _compute_total_limit(self, chain: str) -> Optional[int]:  # noqa: UP045
+        Reindexed gaps arrive as NaN/NaT; normalize them to None so the upload
+        sanitizer emits JSON null instead of the strings "nan"/"NaT". The
+        ``is_scalar`` guard skips list/dict cells, where ``pd.isna`` returns an
+        array and would raise on truthiness."""
+
+        def to_null(value):
+            return None if pd.api.types.is_scalar(value) and pd.isna(value) else self._truncate_cell(value)
+
+        return [[to_null(value) for value in row] for row in data_frame.dropna(how="all").values.tolist()]
+
+    def _compute_total_limit(self, chain: str) -> int:
         """Compute the total record limit based on the sampling config.
+
+        Falls back to ``_MAX_PROFILE_ROWS`` when no sampling is configured so an
+        unsampled profile caps the pages it caches instead of pulling an entire
+        unbounded chain into memory.
 
         Uses ``resolve_static_sampling_config`` with ``row_count=None``
         instead of the ``_resolve_sample_config`` cached property to avoid a
@@ -152,13 +166,13 @@ class BurstIQSampler(DatalakeSampler):
         """
         static = resolve_static_sampling_config(self.sample_config.profileSampleConfig)
         if not static or not static.profileSample:
-            return None
+            return _MAX_PROFILE_ROWS
         if static.profileSampleType == ProfileSampleType.ROWS:
             return int(static.profileSample)
         if static.profileSampleType == ProfileSampleType.PERCENTAGE:
             total = self.client.get_chain_metrics().get(chain, 0)
             return max(1, int(total * static.profileSample / 100))
-        return None
+        return _MAX_PROFILE_ROWS
 
     def _cast_dataframe(self, df: pd.DataFrame) -> pd.DataFrame:
         """Cast DataFrame columns to their declared types from OM entity metadata.
